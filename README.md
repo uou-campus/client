@@ -1,30 +1,3 @@
-# 울산대 캠퍼스 길찾기
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/e2064b28-ebbf-44d9-895e-3c8477cf448e" alt="울산대 캠퍼스 길찾기" width="878"/>
-</p>
-
-<p align="center">
-  <strong>"큰길로 돌지 않고, 보행로와 계단으로 가장 빠른 길."</strong>
-</p>
-
-<p align="center">
-  <a href="https://www.uou-campus.site">www.uou-campus.site</a>
-</p>
-
----
-
-## 스크린샷
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/1e66e934-81f0-4d0e-8a01-1c52b17a0724" width="22%"/>
-  <img src="https://github.com/user-attachments/assets/b0f2a3eb-8942-4902-a957-d76461613c71" width="22%"/>
-  <img src="https://github.com/user-attachments/assets/fdabad8e-3ca4-4175-9b08-fd23b895e39f" width="22%"/>
-  <img src="https://github.com/user-attachments/assets/656c36d1-7bf5-40ca-b382-5362a0568df4" width="22%"/>
-</p>
-
----
-
 ## 소개
 
 **울산대 캠퍼스 길찾기**는 무거캠퍼스 안에서 두 건물 사이 가장 빠른 길을 찾아 주는 웹 서비스입니다.
