@@ -108,13 +108,27 @@ const runsInColumn = (
   const runs: Run[] = [];
   let start = -1;
   let colour: number[] | null = null;
+  /** 색이 바뀐 자리와 그 색, 그 색이 몇 줄째 이어지는지. */
+  let turn: { y: number; colour: number[]; rows: number } | null = null;
 
   const close = (end: number) => {
     if (start >= 0 && end - start >= minHeight)
       runs.push({ top: start, bottom: end });
     start = -1;
     colour = null;
+    turn = null;
   };
+
+  /*
+   * 색이 바뀌어도 이만큼 이어져야 다른 수업으로 본다.
+   *
+   * 과목명이 칸 너비를 거의 채우면, 흰 획이 가로로 지나는 한두 줄에서는 남은
+   * 픽셀 대부분이 획 가장자리의 옅은 색이라 가운뎃값이 확 밝아진다. 그 한 줄을
+   * 칸 경계로 읽어 「기초프로그래밍II」 위 토막이 떨어져 나가고 9시 수업이 10시로
+   * 들어왔다. 두 칸 걸러 보는 자리가 한 픽셀만 달라도 나고 안 나고가 갈렸다.
+   * 글자 획은 몇 줄뿐이고 맞붙은 수업은 적어도 반 교시라, 그 사이에 문턱을 둔다.
+   */
+  const hold = Math.max(3, Math.floor(minHeight / 4));
 
   const channel: number[][] = [[], [], []];
   for (let y = 0; y < height; y += 1) {
@@ -130,7 +144,8 @@ const runsInColumn = (
     }
 
     if (channel[0].length < enough) {
-      close(y);
+      /* 틈 바로 앞에서 색이 바뀌던 줄은 칸 가장자리다. 칸에 넣지 않는다. */
+      close(turn ? turn.y : y);
       continue;
     }
 
@@ -148,14 +163,21 @@ const runsInColumn = (
       colour = here;
       continue;
     }
-    /* 색이 확 바뀌면 다른 수업이 맞붙은 것이다. 사이에 흰 틈이 없을 수 있다. */
-    if (colour && differs(colour, here)) {
-      close(y);
-      start = y;
-      colour = here;
+    /* 색이 확 바뀌어 이어지면 다른 수업이 맞붙은 것이다. 사이에 흰 틈이 없을 수 있다. */
+    if (!colour || !differs(colour, here)) {
+      turn = null;
+      continue;
+    }
+    if (turn && !differs(turn.colour, here)) turn.rows += 1;
+    else turn = { y, colour: here, rows: 1 };
+    if (turn.rows >= hold) {
+      const next = turn;
+      close(next.y);
+      start = next.y;
+      colour = next.colour;
     }
   }
-  close(height);
+  close(turn ? turn.y : height);
   return runs;
 };
 
