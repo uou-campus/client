@@ -421,7 +421,9 @@ const CampusMap = ({
             ? s.junction
             : node.kind === 'gate'
               ? s.gate
-              : s.place,
+              : node.medical
+                ? s.medical
+                : s.place,
         node.precision === 'approx' && !endpoint ? s.approx : '',
       ]
         .filter(Boolean)

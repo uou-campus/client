@@ -11,7 +11,7 @@ const div = (className: string, html: string, size: number) =>
   });
 
 export const placeIcon = (node: CampusNode, className: string) =>
-  div(className, node.no ? String(node.no) : '', 22);
+  div(className, node.no ? String(node.no) : node.medical ? '+' : '', 22);
 
 export const endpointIcon = (label: string, className: string) =>
   div(className, label, 28);

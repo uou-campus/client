@@ -2900,6 +2900,21 @@
       "lng": 129.2547204,
       "precision": "surveyed",
       "note": "끊어져 있던 길을 이으려고 기존 길 위에 새로 찍은 길목."
+    },
+    {
+      "id": "n-new-1",
+      "kind": "place",
+      "name": "의무실",
+      "aliases": [
+        "보건실",
+        "헌혈의 집"
+      ],
+      "lat": 35.5448341,
+      "lng": 129.2582468,
+      "precision": "surveyed",
+      "medical": true,
+      "access": "북카페 뒷문 또는 헌혈의 집 문으로 들어와 복도 끝",
+      "note": "36호관(서점 및 북카페) 안, 헌혈의 집 근처. 건물 안 위치는 모르므로 36 점 바로 위에 찍었다."
     }
   ],
   "edges": [
@@ -8901,6 +8916,17 @@
       "connector": true,
       "source": "assumed",
       "note": "계단 어귀까지 32m 를 곧게 이었다. 이 어귀까지 돌아가던 57m 를 덜어낸다."
+    },
+    {
+      "id": "e-new-1",
+      "from": "n-new-1",
+      "to": "n219",
+      "surface": "path",
+      "shortcut": false,
+      "covered": false,
+      "connector": true,
+      "source": "assumed",
+      "note": "36호관 옆 가장 가까운 길까지 곧게 이었다"
     }
   ]
 }
