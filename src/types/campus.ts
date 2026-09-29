@@ -23,6 +23,10 @@ export interface CampusNode extends LatLng {
   aliases?: string[];
   precision: Precision;
   note?: string;
+  /** 의무실. 지도에 빨간 점으로 따로 찍는다. */
+  medical?: boolean;
+  /** 건물 안에서 찾아 들어가는 법. 도착 안내 밑에 붙인다. */
+  access?: string;
 }
 
 export type Surface =

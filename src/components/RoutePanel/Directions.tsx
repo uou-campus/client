@@ -33,7 +33,12 @@ const Directions = ({ route, steps }: Props) => {
       ))}
       <li className={s.stepLast}>
         <span className={s.stepRailEnd} aria-hidden />
-        <span className={s.stepText}>{arrivalText(route.to)}</span>
+        <span className={s.stepBody}>
+          <span className={s.stepText}>{arrivalText(route.to)}</span>
+          {route.to.access && (
+            <span className={s.stepMeters}>{route.to.access}</span>
+          )}
+        </span>
       </li>
     </ol>
   );

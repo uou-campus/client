@@ -49,6 +49,18 @@ export const gate = style([
   },
 ]);
 
+/** 의무실. 급할 때 한눈에 찾도록 건물 점과 색을 가른다. */
+export const medical = style([
+  dot,
+  {
+    backgroundColor: theme.error,
+    border: `2px solid ${theme.gray[0]}`,
+    color: theme.gray[0],
+    fontSize: '14px',
+    boxShadow: elevation[1],
+  },
+]);
+
 /** 편집 모드에서 확대했을 때만 보이는 길목. */
 export const junction = style({
   width: '12px',
