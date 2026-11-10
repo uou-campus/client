@@ -105,8 +105,13 @@ const EDGE_HIT_SLOP = 6;
 /*
  * 마커끼리 겹칠 때의 순서. MapLibre 마커는 지도 캔버스와 같은 층에 있어서
  * 음수를 주면 캔버스 밑으로 숨어 버린다. 0 위에서만 고른다.
+ *
+ * 갈래마다 한 층(Z_TIER 간격)을 주고, 같은 층 안에서는 남쪽(화면 아래)
+ * 마커가 위로 온다. 예전 Leaflet 지도의 규칙이다 — 이게 없으면 무거관(25)
+ * 점이 바로 위 「무거관 후문」 점에 덮여 안 보인다.
  */
 const Z = { junction: 1, place: 2, here: 3, endpoint: 4 } as const;
+const Z_TIER = 10_000;
 
 /* ── 지도 레이어 이름 ─────────────────────────────────────────────────── */
 
@@ -362,6 +367,32 @@ const tuneBaseStyle = (map: maplibregl.Map) => {
   );
   if (placeLabel) {
     for (const id of poiFilters.keys()) map.moveLayer(id, placeLabel.id);
+  }
+
+  /*
+   * 건물은 납작하게 그린다.
+   *
+   * 원래 스타일은 건물을 높이만큼 세운다(3D). 이 앱은 지도를 안 기울이지만,
+   * 원근 때문에 높은 건물은 옥상이 화면 가장자리 쪽으로 밀려 그려진다. 10층인
+   * 국제관 옥상이 12m 뒤의 무거관을 덮어서 두 건물이 한 덩어리로 보였다. 마커는
+   * 건물 자리에 찍히는데 옥상은 옆으로 비켜 있으니 길 찾을 때도 헷갈린다.
+   *
+   * 세운 건물은 끄고, 낮은 배율에만 쓰던 납작한 건물 레이어를 모든 배율로
+   * 늘린다. 예전 OSM 지도와 같은 모양이다. 납작한 레이어가 없는 스타일이면
+   * 건물이 통째로 사라지니 그때는 손대지 않는다.
+   */
+  const flat = layers.find(
+    (layer) => layer.type === 'fill' && layer['source-layer'] === 'building',
+  );
+  if (flat) {
+    for (const layer of layers) {
+      if (
+        layer.type === 'fill-extrusion' &&
+        layer['source-layer'] === 'building'
+      )
+        map.setLayoutProperty(layer.id, 'visibility', 'none');
+    }
+    map.setLayerZoomRange(flat.id, flat.minzoom ?? 0, 24);
   }
 
   return poiFilters;
@@ -891,6 +922,13 @@ const CampusMap = ({
     for (const marker of markers.current) marker.remove();
     markers.current = [];
 
+    /* 북쪽부터 세어 남쪽일수록 큰 순번. 같은 층 안에서 이 순서로 포갠다. */
+    const southward = new Map(
+      [...graph.nodes.values()]
+        .sort((a, b) => b.lat - a.lat)
+        .map((node, i) => [node.id, i]),
+    );
+
     for (const node of graph.nodes.values()) {
       const isJunction = node.kind === 'junction';
       if (isJunction && (!editing || !near)) continue;
@@ -919,8 +957,9 @@ const CampusMap = ({
           ? junctionIcon(node, className)
           : placeIcon(node, className);
 
+      const tier = endpoint ? Z.endpoint : isJunction ? Z.junction : Z.place;
       icon.root.style.zIndex = String(
-        endpoint ? Z.endpoint : isJunction ? Z.junction : Z.place,
+        tier * Z_TIER + (southward.get(node.id) ?? 0),
       );
 
       /* 지도까지 올라가면 '빈 곳을 눌렀다' 로도 읽힌다. 여기서 끊는다. */
@@ -976,7 +1015,7 @@ const CampusMap = ({
 
     if (!hereMarker.current) {
       const icon = hereIcon(s.here);
-      icon.root.style.zIndex = String(Z.here);
+      icon.root.style.zIndex = String(Z.here * Z_TIER);
       icon.root.style.pointerEvents = 'none';
       hereMarker.current = new maplibregl.Marker({
         element: icon.root,

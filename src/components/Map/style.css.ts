@@ -12,6 +12,14 @@ export const container = style({
  * 기준으로 옆에 붙는다.
  */
 
+/*
+ * 마커는 겹침 순서로 큰 z-index 를 쓴다(남쪽 마커가 위로). 그 값이 배율 단추나
+ * 출처 표기와 겨루지 않게, 마커가 사는 캔버스 층을 따로 묶어 둔다.
+ */
+globalStyle('.maplibregl-canvas-container', {
+  isolation: 'isolate',
+});
+
 const dot = style([
   flex.CENTER,
   font.caption,
