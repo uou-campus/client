@@ -1,6 +1,7 @@
 import { globalStyle, globalFontFace } from '@vanilla-extract/css';
 import theme from './theme';
 import font from './font';
+import elevation from './elevation';
 import pretendardSubset from './pretendard-subset.woff2';
 
 export const pretendard = 'Pretendard';
@@ -100,24 +101,27 @@ globalStyle(':focus-visible', {
   outlineOffset: '2px',
 });
 
-/* ── Leaflet 기본 껍데기를 이 앱 톤으로 눌러 둔다 ─────────────────────── */
+/* ── MapLibre 기본 껍데기를 이 앱 톤으로 눌러 둔다 ─────────────────────── */
 
-globalStyle('.leaflet-container', {
+globalStyle('.maplibregl-map', {
   fontFamily: 'inherit',
   backgroundColor: theme.gray[100],
 });
 
-globalStyle('.leaflet-control-attribution', {
+globalStyle('.maplibregl-ctrl-attrib', {
   ...font.caption,
   backgroundColor: 'rgba(255, 255, 255, 0.82)',
   color: theme.textTertiary,
 });
 
-globalStyle('.leaflet-control-attribution a', {
+globalStyle('.maplibregl-ctrl-attrib a', {
   color: theme.textSecondary,
 });
 
-globalStyle('.leaflet-bar a', {
-  color: theme.textPrimary,
-  borderBottomColor: theme.outline,
+globalStyle('.maplibregl-ctrl-group', {
+  boxShadow: elevation[1],
+});
+
+globalStyle('.maplibregl-ctrl-group button + button', {
+  borderTopColor: theme.outline,
 });

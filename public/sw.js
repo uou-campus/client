@@ -9,7 +9,7 @@
  * 껍데기만 미리 담고 나머지는 처음 받을 때 담는다.
  */
 
-const VERSION = 'v4';
+const VERSION = 'v5';
 const SHELL = `campus-shell-${VERSION}`;
 const ASSETS = `campus-assets-${VERSION}`;
 const TILES = `campus-tiles-${VERSION}`;
@@ -17,7 +17,11 @@ const TILES = `campus-tiles-${VERSION}`;
 /** 타일을 몇 장까지 들고 있을지. 캠퍼스 한 바퀴면 이 정도로 넉넉하다. */
 const TILE_LIMIT = 500;
 
-const TILE_HOST = 'tile.openstreetmap.org';
+/*
+ * 배경 지도(OpenFreeMap). 스타일·타일·글꼴·아이콘이 다 이 호스트에서 온다.
+ * 벡터 타일이라 한 장이 넓은 자리를 덮어서, 같은 개수로 예전보다 많이 담긴다.
+ */
+const TILE_HOST = 'tiles.openfreemap.org';
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

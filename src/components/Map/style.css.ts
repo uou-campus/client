@@ -7,10 +7,17 @@ export const container = style({
   zIndex: 0,
 });
 
-/* Leaflet 이 divIcon 에 자기 테두리를 붙인다. 전부 걷어낸다. */
-globalStyle('.leaflet-div-icon', {
-  background: 'transparent',
-  border: 'none',
+/*
+ * 마커 껍데기는 MapLibre 가 position:absolute 로 세운다. 이름표는 그 상자를
+ * 기준으로 옆에 붙는다.
+ */
+
+/*
+ * 마커는 겹침 순서로 큰 z-index 를 쓴다(남쪽 마커가 위로). 그 값이 배율 단추나
+ * 출처 표기와 겨루지 않게, 마커가 사는 캔버스 층을 따로 묶어 둔다.
+ */
+globalStyle('.maplibregl-canvas-container', {
+  isolation: 'isolate',
 });
 
 const dot = style([
@@ -106,23 +113,22 @@ export const here = style({
   boxShadow: '0 0 0 6px rgba(37, 99, 235, 0.18)',
 });
 
-/* 이름표. 확대해야 뜬다. */
-globalStyle('.leaflet-tooltip.campus-label', {
+/* 이름표. 확대해야 뜬다. 점 가운데 높이에서 오른쪽으로 붙는다. */
+globalStyle('.campus-label', {
   ...font.caption,
+  position: 'absolute',
+  top: '50%',
+  transform: 'translateY(-50%)',
   padding: '1px 6px',
-  border: 'none',
   borderRadius: layout.radius.xs,
   backgroundColor: 'rgba(255, 255, 255, 0.92)',
   color: theme.textPrimary,
   boxShadow: elevation[1],
   whiteSpace: 'nowrap',
-});
-
-globalStyle('.leaflet-tooltip.campus-label::before', {
-  display: 'none',
+  pointerEvents: 'none',
 });
 
 /** 확대 배율이 낮을 땐 이름표를 통째로 접는다. */
-globalStyle('.campus-map--far .leaflet-tooltip.campus-label', {
+globalStyle('.campus-map--far .campus-label', {
   display: 'none',
 });

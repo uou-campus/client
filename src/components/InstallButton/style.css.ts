@@ -9,7 +9,7 @@ import { elevation, flex, font, layout, media, spacing, theme } from '@/styles';
  * 단추 둘이 제목 옆을 물고 있었다. 지도 위로 내보내 자기 자리를 준다.
  *
  * 왼쪽 위는 패널(넓은 화면)과 상단 안내 띠(좁은 화면)가 쓰고, 오른쪽 아래는
- * Leaflet 배율 단추와 출처 표기가 쓴다. 남는 자리는 오른쪽 위다.
+ * 지도 배율 단추와 출처 표기가 쓴다. 남는 자리는 오른쪽 위다.
  */
 export const holder = style([
   flex.COLUMN_END,

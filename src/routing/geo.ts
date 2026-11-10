@@ -68,7 +68,7 @@ export const fromPlane = (
   lng: origin.lng + plane.x / (M_PER_DEG_LAT * Math.cos(toRad(origin.lat))),
 });
 
-/** 여러 점을 다 담는 사각형. Leaflet 의 fitBounds 에 그대로 넘긴다. */
+/** 여러 점을 다 담는 사각형. 지도의 fitBounds 에 넘긴다. */
 export const boundsOf = (points: LatLng[]): [LatLng, LatLng] | null => {
   if (points.length === 0) return null;
   let minLat = Infinity;
