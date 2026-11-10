@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@vanilla-extract/css": "^1.21.2",
-    "leaflet": "^1.9.4",
+    "maplibre-gl": "^5.24.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "tesseract.js": "^7.0.0"
@@ -27,7 +27,7 @@
     "@eslint/js": "^10.0.1",
     "@tesseract.js-data/eng": "^1.0.0",
     "@tesseract.js-data/kor": "^1.0.0",
-    "@types/leaflet": "^1.9.20",
+    "@types/geojson": "^7946.0.16",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

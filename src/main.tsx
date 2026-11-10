@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import 'leaflet/dist/leaflet.css';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import '@/styles/global.css';
 import { initAnalytics } from '@/analytics/gtag';
 import App from './App.tsx';

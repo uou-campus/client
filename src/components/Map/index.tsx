@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
-import L from 'leaflet';
+import maplibregl, {
+  type ExpressionSpecification,
+  type GeoJSONSource,
+  type LineLayerSpecification,
+  type StyleSpecification,
+} from 'maplibre-gl';
+import type { Feature, FeatureCollection, Geometry } from 'geojson';
 import type { CampusEdge, CampusNode, LatLng } from '@/types/campus';
 import type { CampusGraph } from '@/routing/graph';
 import type { Route } from '@/routing/route';
@@ -8,18 +14,25 @@ import { boundsOf } from '@/routing/geo';
 import {
   CAMPUS_CENTER,
   CAMPUS_ZOOM,
-  TILE_ATTRIBUTION,
-  TILE_URL,
-  baseEdgeStyle,
+  EDGE_KINDS,
+  EDGE_STYLES,
+  EDITING_EDGE,
+  FIT_MAX_ZOOM,
+  MAP_STYLE_URL,
+  MAX_ZOOM,
+  SELECTED_EDGE_COLOR,
   accuracyStyle,
   compareStyle,
+  edgeKind,
   passedStyle,
   routeCasingStyle,
   routeStyle,
   shortcutOverlayStyle,
+  type LineStyle,
 } from '@/map/mapStyle';
 import { endpointIcon, hereIcon, junctionIcon, placeIcon } from '@/map/icons';
 import type { SheetState } from '@/components/RoutePanel';
+import { theme } from '@/styles';
 import * as s from './style.css';
 
 interface Props {
@@ -61,13 +74,17 @@ interface Props {
   onMapClick: (at: LatLng) => void;
 }
 
+/*
+ * 배율은 모두 MapLibre 기준이다(Leaflet 보다 하나 작다).
+ */
+
 /** 이름표를 보여 줄 최소 배율. */
-const LABEL_ZOOM = 17;
+const LABEL_ZOOM = 16;
 /**
  * 길목을 보여 줄 최소 배율. 캠퍼스 전체가 보이는 배율에서 길목 삼백 개를 다
  * 찍으면 지도가 아니라 점 무더기가 된다.
  */
-const JUNCTION_ZOOM = 17;
+const JUNCTION_ZOOM = 16;
 
 /**
  * 안내를 시작할 때 맞추는 배율.
@@ -75,12 +92,255 @@ const JUNCTION_ZOOM = 17;
  * 여기서 한 번만 맞추고, 그 뒤로는 위치만 따라가며 배율은 손대지 않는다. 매번
  * 다시 맞추면 걷는 사람이 손으로 넓혀 본 화면을 몇 초마다 되돌려 놓는 셈이 된다.
  */
-const GUIDE_ZOOM = 18;
+const GUIDE_ZOOM = 17;
 
 /** 이보다 작은 오차 반경은 그리지 않는다. 현위치 점이 이미 그만큼을 덮는다. */
 const HALO_MIN_METERS = 10;
 
-const toLeaflet = (p: LatLng): L.LatLngTuple => [p.lat, p.lng];
+/** 길을 누를 때 손가락이 조금 빗나가도 잡히게 잡아 주는 여유(px). */
+const EDGE_HIT_SLOP = 6;
+
+/*
+ * 마커끼리 겹칠 때의 순서. MapLibre 마커는 지도 캔버스와 같은 층에 있어서
+ * 음수를 주면 캔버스 밑으로 숨어 버린다. 0 위에서만 고른다.
+ */
+const Z = { junction: 1, place: 2, here: 3, endpoint: 4 } as const;
+
+/* ── 지도 레이어 이름 ─────────────────────────────────────────────────── */
+
+const SRC = {
+  edges: 'campus-edges',
+  compare: 'campus-compare',
+  route: 'campus-route',
+  passed: 'campus-passed',
+  shortcut: 'campus-shortcut',
+  halo: 'campus-halo',
+} as const;
+
+const edgeLayerId = (kind: string) => `campus-edge-${kind}`;
+const EDGE_LAYER_IDS = EDGE_KINDS.map(edgeLayerId);
+
+/**
+ * 지명은 한글로. 배경 스타일은 영문 이름을 먼저 쓰는데, 캠퍼스 앱에서
+ * 「Ulsan University Hospital」보다 「울산대학교병원」이 낫다.
+ */
+const KOREAN_NAME: ExpressionSpecification = [
+  'coalesce',
+  ['get', 'name:ko'],
+  ['get', 'name'],
+];
+
+/**
+ * 배경 지도를 못 받았을 때(첫 실행부터 오프라인) 쓰는 빈 바탕.
+ * 캠퍼스 길과 경로는 번들에 들어 있으니 이것만 있어도 길찾기는 된다.
+ */
+const FALLBACK_STYLE: StyleSpecification = {
+  version: 8,
+  sources: {},
+  layers: [
+    {
+      id: 'background',
+      type: 'background',
+      paint: { 'background-color': theme.gray[100] },
+    },
+  ],
+};
+
+/* ── 도형 만들기 ─────────────────────────────────────────────────────── */
+
+const toLngLat = (p: LatLng): [number, number] => [p.lng, p.lat];
+
+type Props_ = Record<string, string | number | boolean>;
+
+const lines = (
+  items: { points: LatLng[]; props?: Props_ }[],
+): FeatureCollection<Geometry, Props_> => ({
+  type: 'FeatureCollection',
+  features: items
+    .filter((item) => item.points.length > 1)
+    .map((item): Feature<Geometry, Props_> => ({
+      type: 'Feature',
+      properties: item.props ?? {},
+      geometry: {
+        type: 'LineString',
+        coordinates: item.points.map(toLngLat),
+      },
+    })),
+});
+
+const EMPTY = lines([]);
+
+/** 땅 위의 원. 미터 단위 반경을 위경도 다각형으로 펼친다. */
+const circle = (
+  center: LatLng,
+  meters: number,
+): FeatureCollection<Geometry, Props_> => {
+  const steps = 48;
+  const dLat = meters / 111_320;
+  const dLng = meters / (111_320 * Math.cos((center.lat * Math.PI) / 180));
+  const ring: [number, number][] = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = (i / steps) * Math.PI * 2;
+    ring.push([
+      center.lng + dLng * Math.cos(t),
+      center.lat + dLat * Math.sin(t),
+    ]);
+  }
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        properties: {},
+        geometry: { type: 'Polygon', coordinates: [ring] },
+      },
+    ],
+  };
+};
+
+const linePaint = (style: LineStyle): LineLayerSpecification['paint'] => ({
+  'line-color': style.color,
+  'line-width': style.width,
+  'line-opacity': style.opacity,
+  ...(style.dash ? { 'line-dasharray': style.dash } : {}),
+});
+
+const LINE_LAYOUT: LineLayerSpecification['layout'] = {
+  'line-cap': 'round',
+  'line-join': 'round',
+};
+
+const setSource = (
+  map: maplibregl.Map,
+  id: string,
+  data: FeatureCollection<Geometry, Props_>,
+) => {
+  (map.getSource(id) as GeoJSONSource | undefined)?.setData(data);
+};
+
+/**
+ * 캠퍼스 위에 덧그리는 레이어를 깐다. 스타일을 새로 받을 때마다 다 지워지므로
+ * 그때마다 다시 부른다. 내용은 비워 두고, 각 이펙트가 채운다.
+ */
+const addOverlays = (map: maplibregl.Map) => {
+  for (const id of Object.values(SRC)) {
+    if (!map.getSource(id)) map.addSource(id, { type: 'geojson', data: EMPTY });
+  }
+
+  const line = (id: string, source: string, style: LineStyle) =>
+    map.addLayer({
+      id,
+      type: 'line',
+      source,
+      layout: LINE_LAYOUT,
+      paint: linePaint(style),
+    });
+
+  /* 아래에 깔리는 것부터. */
+  for (const kind of EDGE_KINDS) {
+    map.addLayer({
+      id: edgeLayerId(kind),
+      type: 'line',
+      source: SRC.edges,
+      filter: ['==', ['get', 'kind'], kind],
+      layout: LINE_LAYOUT,
+      paint: linePaint(EDGE_STYLES[kind]),
+    });
+  }
+  line('campus-compare', SRC.compare, compareStyle);
+  line('campus-route-casing', SRC.route, routeCasingStyle);
+  line('campus-route', SRC.route, routeStyle);
+  line('campus-passed', SRC.passed, passedStyle);
+  line('campus-shortcut', SRC.shortcut, shortcutOverlayStyle);
+
+  map.addLayer({
+    id: 'campus-halo-fill',
+    type: 'fill',
+    source: SRC.halo,
+    paint: {
+      'fill-color': accuracyStyle.color,
+      'fill-opacity': accuracyStyle.fillOpacity,
+    },
+  });
+  map.addLayer({
+    id: 'campus-halo-line',
+    type: 'line',
+    source: SRC.halo,
+    paint: {
+      'line-color': accuracyStyle.color,
+      'line-opacity': accuracyStyle.lineOpacity,
+      'line-width': 1,
+    },
+  });
+};
+
+/**
+ * 배경 지도를 캠퍼스 앱에 맞게 다듬는다.
+ *
+ * - 지명은 한글로.
+ * - 가게·시설 아이콘(POI)은 끈다. 캠퍼스 건물은 앱이 번호 점으로 따로 찍는데,
+ *   배경 아이콘까지 겹치면 어느 게 누를 수 있는 건지 헷갈린다.
+ */
+const tuneBaseStyle = (map: maplibregl.Map) => {
+  for (const layer of map.getStyle().layers ?? []) {
+    if (layer.type !== 'symbol' || layer.id.startsWith('campus-')) continue;
+    if (layer.id.startsWith('poi')) {
+      map.setLayoutProperty(layer.id, 'visibility', 'none');
+      continue;
+    }
+    const field = layer.layout?.['text-field'];
+    /* 도로 번호 방패처럼 이름이 아닌 글자는 그대로 둔다. */
+    if (field && JSON.stringify(field).includes('name')) {
+      map.setLayoutProperty(layer.id, 'text-field', KOREAN_NAME);
+    }
+  }
+};
+
+/** 화면 가장자리에서 안쪽으로 inset 비율만큼 들어온 상자 안에 있는지. */
+const isWellInView = (map: maplibregl.Map, p: LatLng, inset = 0.15) => {
+  const b = map.getBounds();
+  const w = b.getEast() - b.getWest();
+  const h = b.getNorth() - b.getSouth();
+  return (
+    p.lng > b.getWest() + w * inset &&
+    p.lng < b.getEast() - w * inset &&
+    p.lat > b.getSouth() + h * inset &&
+    p.lat < b.getNorth() - h * inset
+  );
+};
+
+/**
+ * 지도를 만든다. 못 만들면 null.
+ *
+ * MapLibre 는 WebGL 로 그린다. WebGL 을 못 쓰는 브라우저(아주 오래된 기기,
+ * 하드웨어 가속을 끈 경우)에서는 생성자가 예외를 던지는데, 그게 그대로 터지면
+ * 길찾기 패널까지 앱 전체가 하얗게 죽는다. 지도 자리만 비워 두고 나머지는
+ * 그대로 돌게 한다.
+ *
+ * 돌리기와 기울이기는 막는다. 캠퍼스 안내 지도는 북쪽이 위로 고정돼 있어야
+ * 「오른쪽으로 꺾어」 같은 말과 화면이 어긋나지 않는다.
+ */
+const createMap = (container: HTMLElement): maplibregl.Map | null => {
+  try {
+    const instance = new maplibregl.Map({
+      container,
+      style: MAP_STYLE_URL,
+      center: toLngLat(CAMPUS_CENTER),
+      zoom: CAMPUS_ZOOM,
+      maxZoom: MAX_ZOOM,
+      attributionControl: { compact: true },
+      dragRotate: false,
+      pitchWithRotate: false,
+      touchPitch: false,
+    });
+    instance.touchZoomRotate.disableRotation();
+    instance.keyboard.disableRotation();
+    return instance;
+  } catch (error) {
+    console.error('[map] 지도를 만들지 못했습니다.', error);
+    return null;
+  }
+};
 
 const CampusMap = ({
   graph,
@@ -103,7 +363,13 @@ const CampusMap = ({
   onMoveNode,
   onMapClick,
 }: Props) => {
-  const [zoom, setZoom] = useState(CAMPUS_ZOOM);
+  /** 길목을 보여 줄 만큼 당겼는지. 배율 숫자 자체는 매 순간 바뀌어서 이것만 든다. */
+  const [near, setNear] = useState(false);
+  /**
+   * 배경 스타일을 받아 덧그림 레이어를 깐 횟수. 0 이면 아직이다.
+   * 스타일을 다시 받으면 레이어가 새로 깔리니, 이 값이 바뀌면 내용을 다시 채운다.
+   */
+  const [styleRev, setStyleRev] = useState(0);
   const holder = useRef<HTMLDivElement>(null);
   /** 지도를 만든 뒤에야 생기는 손잡이. 경로가 정해질 때 다시 부른다. */
   const fitTo = useRef<(points: LatLng[], remember?: boolean) => void>(
@@ -111,12 +377,11 @@ const CampusMap = ({
   );
   /** 마지막으로 맞춘 대상. 시트가 움직이면 같은 것을 다시 맞춘다. */
   const lastFit = useRef<LatLng[] | null>(null);
-  const map = useRef<L.Map | null>(null);
-  const baseLayer = useRef<L.LayerGroup | null>(null);
-  const routeLayer = useRef<L.LayerGroup | null>(null);
-  const markerLayer = useRef<L.LayerGroup | null>(null);
-  const hereMarker = useRef<L.Marker | null>(null);
-  const hereHalo = useRef<L.Circle | null>(null);
+  const map = useRef<maplibregl.Map | null>(null);
+  const markers = useRef<maplibregl.Marker[]>([]);
+  const hereMarker = useRef<maplibregl.Marker | null>(null);
+  /** 지도에서 누른 길을 간선으로 되찾으려고 들고 있는 표. */
+  const edgesById = useRef(new Map<string, CampusEdge>());
 
   /* 콜백은 매 렌더 새로 오지만 지도는 한 번만 만든다. 최신 것만 참조로 들고 간다. */
   const handlers = useRef({ onPickNode, onPickEdge, onMoveNode, onMapClick });
@@ -127,6 +392,12 @@ const CampusMap = ({
   const nodesRef = useRef(graph.nodes);
   useEffect(() => {
     nodesRef.current = graph.nodes;
+  });
+
+  /* 지도를 누른 게 길을 고른 건지는 편집 중일 때만 따진다. */
+  const editingRef = useRef(editing);
+  useEffect(() => {
+    editingRef.current = editing;
   });
 
   /* 따라가기를 켤 때 최신 위치를 봐야 하는데, 위치마다 다시 돌 필요는 없다. */
@@ -157,37 +428,87 @@ const CampusMap = ({
   useEffect(() => {
     if (!holder.current || map.current) return;
 
-    const instance = L.map(holder.current, {
-      center: toLeaflet(CAMPUS_CENTER),
-      zoom: CAMPUS_ZOOM,
-      zoomControl: false,
-      attributionControl: true,
+    const instance = createMap(holder.current);
+    if (!instance) return;
+
+    instance.addControl(
+      new maplibregl.NavigationControl({ showCompass: false }),
+      'bottom-right',
+    );
+
+    /*
+     * 배경 스타일이 들어올 때마다(처음, 그리고 대체 바탕으로 바꿨을 때) 덧그림
+     * 레이어를 다시 깐다. 'load' 는 처음 한 번뿐이라 'style.load' 를 듣는다.
+     */
+    let styled = false;
+    instance.on('style.load', () => {
+      styled = true;
+      tuneBaseStyle(instance);
+      addOverlays(instance);
+      setStyleRev((n) => n + 1);
     });
 
-    L.tileLayer(TILE_URL, {
-      maxZoom: 19,
-      attribution: TILE_ATTRIBUTION,
-    }).addTo(instance);
-
-    L.control.zoom({ position: 'bottomright' }).addTo(instance);
-
-    baseLayer.current = L.layerGroup().addTo(instance);
-    routeLayer.current = L.layerGroup().addTo(instance);
-    markerLayer.current = L.layerGroup().addTo(instance);
+    /*
+     * 스타일을 못 받으면 'style.load' 가 영영 안 와서 길도 경로도 안 그려진다.
+     * 그때는 빈 바탕으로 갈아 끼운다. 스타일이 들어온 뒤의 오류(타일 한 장)는
+     * 지도가 알아서 넘긴다.
+     *
+     * 여기서 오류를 받아 가면 MapLibre 는 콘솔에 따로 찍지 않는다. 개발 중에는
+     * 원인을 볼 수 있게 직접 찍어 둔다.
+     */
+    let fellBack = false;
+    instance.on('error', (event) => {
+      if (import.meta.env.DEV) console.warn('[map]', event.error);
+      if (styled || fellBack) return;
+      fellBack = true;
+      instance.setStyle(FALLBACK_STYLE);
+    });
 
     const syncZoomClass = () => {
       const level = instance.getZoom();
-      setZoom(level);
+      setNear(level >= JUNCTION_ZOOM);
       holder.current?.classList.toggle('campus-map--far', level < LABEL_ZOOM);
     };
     syncZoomClass();
     instance.on('zoomend', syncZoomClass);
-    instance.on('click', (e) => handlers.current.onMapClick(e.latlng));
+
+    /** 이 화면 좌표 근처에 있는 캠퍼스 길. 편집 중이 아니면 찾지 않는다. */
+    const edgeAt = (x: number, y: number) => {
+      if (!editingRef.current || !instance.getLayer(EDGE_LAYER_IDS[0])) {
+        return undefined;
+      }
+      const hit = instance.queryRenderedFeatures(
+        [
+          [x - EDGE_HIT_SLOP, y - EDGE_HIT_SLOP],
+          [x + EDGE_HIT_SLOP, y + EDGE_HIT_SLOP],
+        ],
+        { layers: EDGE_LAYER_IDS },
+      );
+      const id = hit[0]?.properties?.edgeId;
+      return typeof id === 'string' ? edgesById.current.get(id) : undefined;
+    };
+
+    instance.on('click', (e) => {
+      const edge = edgeAt(e.point.x, e.point.y);
+      if (edge) {
+        handlers.current.onPickEdge(edge);
+        return;
+      }
+      handlers.current.onMapClick({ lat: e.lngLat.lat, lng: e.lngLat.lng });
+    });
+
+    /* 편집 중에 길 위에 올라가면 누를 수 있다는 걸 손가락 모양으로 알린다. */
+    instance.on('mousemove', (e) => {
+      if (!editingRef.current) return;
+      instance.getCanvas().style.cursor = edgeAt(e.point.x, e.point.y)
+        ? 'pointer'
+        : '';
+    });
 
     /*
      * 개발 모드에서는 스타일이 자바스크립트로 뒤늦게 붙는다. 그래서 이 시점의
-     * 컨테이너는 아직 0×0 일 수 있고, 그대로 fitBounds 를 부르면 최대 배율로
-     * 튄다. 크기가 실제로 잡힌 뒤에 한 번만 맞춘다.
+     * 컨테이너는 아직 0×0 일 수 있고, 그대로 fitBounds 를 부르면 엉뚱한
+     * 배율로 튄다. 크기가 실제로 잡힌 뒤에 한 번만 맞춘다.
      */
     /*
      * 길찾기 패널이 지도를 덮는다. 세로로 든 폰에선 아래를, 그 밖에는 왼쪽을
@@ -213,7 +534,7 @@ const CampusMap = ({
       const bottom = atBottom && panel ? Math.round(panel.height) : 0;
 
       /*
-       * 여백이 화면을 다 먹으면 fitBounds 가 최대 배율로 튄다. 남길 자리를 지킨다.
+       * 여백이 화면을 다 먹으면 fitBounds 가 맞추기를 포기한다. 남길 자리를 지킨다.
        *
        * 남기는 양은 고정 픽셀이 아니라 비율이다. 세로 폰에서 시트를 펼치면
        * 아래가 화면의 3/4 을 물기 때문에, 96px 만 남기면 캠퍼스가 실오라기
@@ -222,17 +543,22 @@ const CampusMap = ({
       const cap = (value: number, limit: number) =>
         Math.max(0, Math.min(value, limit * 0.55));
 
-      /* Leaflet 이 들고 있는 크기가 낡아 있으면 배율을 엉뚱하게 고른다. */
-      instance.invalidateSize({ animate: false });
+      /* 지도가 들고 있는 크기가 낡아 있으면 배율을 엉뚱하게 고른다. */
+      instance.resize();
 
       /*
        * animate: false 가 꼭 필요하다. 애니메이션이 붙은 fitBounds 는 전환이
        * 끝나야 자리가 잡히는데, 탭이 뒤에 있거나 화면이 멈춘 환경에서는 그
        * 전환이 영영 안 끝나서 지도가 처음 배율에 그대로 머문다.
        */
-      instance.fitBounds([toLeaflet(box[0]), toLeaflet(box[1])], {
-        paddingTopLeft: [cap(left, width) + 16, 16],
-        paddingBottomRight: [16, cap(bottom, height) + 16],
+      instance.fitBounds([toLngLat(box[0]), toLngLat(box[1])], {
+        padding: {
+          top: 16,
+          left: cap(left, width) + 16,
+          right: 16,
+          bottom: cap(bottom, height) + 16,
+        },
+        maxZoom: FIT_MAX_ZOOM,
         animate: false,
       });
     };
@@ -254,7 +580,7 @@ const CampusMap = ({
     /*
      * 폰을 돌렸을 때.
      *
-     * Leaflet 이 들고 있는 크기는 창이 바뀔 때마다 새로 잡아 준다. 다만 보던
+     * 지도가 들고 있는 크기는 창이 바뀔 때마다 새로 잡아 준다. 다만 보던
      * 자리를 다시 맞추는 것은 가로세로가 뒤집혔을 때뿐이다 — 세로에 맞춰 잡아
      * 둔 배율을 납작한 화면에 그대로 쓰면 캠퍼스가 위아래로 잘린다. 사람이
      * 손으로 넓혀 본 화면은 그대로 둔다.
@@ -268,7 +594,7 @@ const CampusMap = ({
       /* 걷는 중에는 캠퍼스가 아니라 발밑을 봐야 한다. */
       if (followRef.current) {
         const at = hereRef.current;
-        if (at) instance.panTo(toLeaflet(at), { animate: false });
+        if (at) instance.jumpTo({ center: toLngLat(at) });
         return;
       }
       fitPoints(lastFit.current ?? [...nodesRef.current.values()]);
@@ -278,7 +604,7 @@ const CampusMap = ({
     let settle = 0;
 
     const onResize = () => {
-      instance.invalidateSize({ animate: false });
+      instance.resize();
       const now = shapeOf();
       if (now === shape) return;
       shape = now;
@@ -300,6 +626,10 @@ const CampusMap = ({
       window.removeEventListener('resize', onResize);
       instance.remove();
       map.current = null;
+      /* 지도와 함께 사라진 마커를 들고 있으면 다음 지도에 안 붙는다. */
+      markers.current = [];
+      hereMarker.current = null;
+      setStyleRev(0);
     };
   }, [panelRef]);
 
@@ -315,7 +645,7 @@ const CampusMap = ({
   useEffect(() => {
     const instance = map.current;
     if (!instance || follow) return;
-    instance.invalidateSize({ animate: false });
+    instance.resize();
     const all = [...nodesRef.current.values()];
     if (picking) fitTo.current(all, false);
     else fitTo.current(lastFit.current ?? all);
@@ -347,69 +677,104 @@ const CampusMap = ({
 
   /* ── 배경 길 ─────────────────────────────────────────────────────────── */
   useEffect(() => {
-    const layer = baseLayer.current;
-    if (!layer) return;
-    layer.clearLayers();
+    const instance = map.current;
+    if (!instance || !styleRev) return;
 
+    const byId = new Map<string, CampusEdge>();
+    const items: { points: LatLng[]; props: Props_ }[] = [];
     for (const [id, links] of graph.links) {
       for (const link of links) {
         /* 양방향이라 같은 간선이 두 번 나온다. 한쪽만 그린다. */
         if (link.edge.from !== id) continue;
-
-        const line = L.polyline(link.points.map(toLeaflet), {
-          ...baseEdgeStyle(link.edge),
-          ...(editing ? { interactive: true, weight: 6, opacity: 0.7 } : {}),
+        byId.set(link.edge.id, link.edge);
+        items.push({
+          points: link.points,
+          props: { kind: edgeKind(link.edge), edgeId: link.edge.id },
         });
-
-        if (editing) {
-          if (link.edge.id === selectedId) line.setStyle({ color: '#B45309' });
-          line.on('click', (e) => {
-            L.DomEvent.stop(e);
-            handlers.current.onPickEdge(link.edge);
-          });
-        }
-        line.addTo(layer);
       }
     }
-  }, [graph, editing, selectedId]);
+    edgesById.current = byId;
+    setSource(instance, SRC.edges, lines(items));
+
+    /* 편집 중에는 눌러 고르기 좋게 굵고 진하게, 고른 길은 색을 입힌다. */
+    for (const kind of EDGE_KINDS) {
+      const layer = edgeLayerId(kind);
+      const base = EDGE_STYLES[kind];
+      instance.setPaintProperty(
+        layer,
+        'line-width',
+        editing ? EDITING_EDGE.width : base.width,
+      );
+      instance.setPaintProperty(
+        layer,
+        'line-opacity',
+        editing ? EDITING_EDGE.opacity : base.opacity,
+      );
+      instance.setPaintProperty(
+        layer,
+        'line-color',
+        editing && selectedId
+          ? [
+              'case',
+              ['==', ['get', 'edgeId'], selectedId],
+              SELECTED_EDGE_COLOR,
+              base.color,
+            ]
+          : base.color,
+      );
+    }
+    if (!editing) instance.getCanvas().style.cursor = '';
+  }, [graph, editing, selectedId, styleRev]);
 
   /* ── 고른 경로 ───────────────────────────────────────────────────────── */
   useEffect(() => {
-    const layer = routeLayer.current;
-    if (!layer) return;
-    layer.clearLayers();
-    if (!route) return;
+    const instance = map.current;
+    if (!instance || !styleRev) return;
 
-    if (compare) {
-      L.polyline(compare.points.map(toLeaflet), compareStyle).addTo(layer);
-    }
-
-    L.polyline(route.points.map(toLeaflet), routeCasingStyle).addTo(layer);
-    L.polyline(route.points.map(toLeaflet), routeStyle).addTo(layer);
+    setSource(
+      instance,
+      SRC.compare,
+      route && compare ? lines([{ points: compare.points }]) : EMPTY,
+    );
+    setSource(
+      instance,
+      SRC.route,
+      route ? lines([{ points: route.points }]) : EMPTY,
+    );
 
     /* 이미 지나온 만큼은 회색으로 덮는다. 남은 길만 초록으로 남는다. */
-    if (progress && progress.passed.length > 1) {
-      L.polyline(progress.passed.map(toLeaflet), passedStyle).addTo(layer);
-    }
+    setSource(
+      instance,
+      SRC.passed,
+      route && progress && progress.passed.length > 1
+        ? lines([{ points: progress.passed }])
+        : EMPTY,
+    );
 
     /* 경로 안의 지름길 구간에만 흰 점선을 덧씌워 눈에 띄게. */
-    for (const leg of route.legs) {
-      if (!leg.link.edge.shortcut) continue;
-      L.polyline(leg.link.points.map(toLeaflet), shortcutOverlayStyle).addTo(
-        layer,
-      );
-    }
-  }, [route, compare, progress]);
+    setSource(
+      instance,
+      SRC.shortcut,
+      route
+        ? lines(
+            route.legs
+              .filter((leg) => leg.link.edge.shortcut)
+              .map((leg) => ({ points: leg.link.points })),
+          )
+        : EMPTY,
+    );
+  }, [route, compare, progress, styleRev]);
 
   /* ── 장소 표시 ───────────────────────────────────────────────────────── */
   useEffect(() => {
-    const layer = markerLayer.current;
-    if (!layer) return;
-    layer.clearLayers();
+    const instance = map.current;
+    if (!instance) return;
+    for (const marker of markers.current) marker.remove();
+    markers.current = [];
 
     for (const node of graph.nodes.values()) {
       const isJunction = node.kind === 'junction';
-      if (isJunction && (!editing || zoom < JUNCTION_ZOOM)) continue;
+      if (isJunction && (!editing || !near)) continue;
 
       const endpoint = node.id === fromId || node.id === toId;
       const className = [
@@ -429,81 +794,79 @@ const CampusMap = ({
         .filter(Boolean)
         .join(' ');
 
-      const marker = L.marker(toLeaflet(node), {
-        icon: endpoint
-          ? endpointIcon(node.id === fromId ? '출발' : '도착', className)
-          : isJunction
-            ? junctionIcon(className)
-            : placeIcon(node, className),
-        draggable: editing,
-        keyboard: false,
-        zIndexOffset: endpoint ? 1000 : isJunction ? -200 : 0,
-      });
+      const icon = endpoint
+        ? endpointIcon(node, node.id === fromId ? '출발' : '도착', className)
+        : isJunction
+          ? junctionIcon(node, className)
+          : placeIcon(node, className);
 
-      if (node.name) {
-        marker.bindTooltip(node.name, {
-          className: 'campus-label',
-          direction: 'right',
-          offset: [12, 0],
-          permanent: true,
-        });
-      }
+      icon.root.style.zIndex = String(
+        endpoint ? Z.endpoint : isJunction ? Z.junction : Z.place,
+      );
 
-      marker.on('click', (e) => {
-        L.DomEvent.stop(e);
+      /* 지도까지 올라가면 '빈 곳을 눌렀다' 로도 읽힌다. 여기서 끊는다. */
+      icon.root.addEventListener('click', (e) => {
+        e.stopPropagation();
         handlers.current.onPickNode(node);
       });
+
+      const marker = new maplibregl.Marker({
+        element: icon.root,
+        anchor: 'center',
+        draggable: editing,
+      })
+        .setLngLat(toLngLat(node))
+        .addTo(instance);
+
       if (editing) {
         marker.on('dragend', () => {
-          const { lat, lng } = marker.getLatLng();
+          const { lat, lng } = marker.getLngLat();
           handlers.current.onMoveNode(node.id, { lat, lng });
         });
       }
 
-      marker.addTo(layer);
+      markers.current.push(marker);
     }
-  }, [graph, editing, fromId, toId, zoom]);
+  }, [graph, editing, fromId, toId, near]);
 
   /* ── 현위치 ──────────────────────────────────────────────────────────── */
   useEffect(() => {
     const instance = map.current;
     if (!instance) return;
 
+    /*
+     * 오차 반경은 지도 레이어로, 점은 그 위의 마커로 그린다. 점이 늘 위라
+     * 반경에 묻히지 않는다. 반경이 점만큼 작으면 그리지 않는다 — 테두리만
+     * 겹쳐 지저분해진다.
+     */
+    if (styleRev) {
+      setSource(
+        instance,
+        SRC.halo,
+        here && accuracy !== null && accuracy > HALO_MIN_METERS
+          ? circle(here, accuracy)
+          : EMPTY,
+      );
+    }
+
     if (!here) {
       hereMarker.current?.remove();
       hereMarker.current = null;
-      hereHalo.current?.remove();
-      hereHalo.current = null;
       return;
     }
 
-    /*
-     * 오차 반경을 먼저 깐다. 점보다 아래에 있어야 점이 안 묻힌다.
-     * 반경이 점만큼 작으면 그리지 않는다 — 테두리만 겹쳐 지저분해진다.
-     */
-    if (accuracy !== null && accuracy > HALO_MIN_METERS) {
-      if (!hereHalo.current) {
-        hereHalo.current = L.circle(toLeaflet(here), {
-          ...accuracyStyle,
-          radius: accuracy,
-        }).addTo(instance);
-      } else {
-        hereHalo.current.setLatLng(toLeaflet(here));
-        hereHalo.current.setRadius(accuracy);
-      }
-    } else {
-      hereHalo.current?.remove();
-      hereHalo.current = null;
-    }
-
     if (!hereMarker.current) {
-      hereMarker.current = L.marker(toLeaflet(here), {
-        icon: hereIcon(s.here),
-        interactive: false,
-        zIndexOffset: 900,
-      }).addTo(instance);
+      const icon = hereIcon(s.here);
+      icon.root.style.zIndex = String(Z.here);
+      icon.root.style.pointerEvents = 'none';
+      hereMarker.current = new maplibregl.Marker({
+        element: icon.root,
+        anchor: 'center',
+      })
+        .setLngLat(toLngLat(here))
+        .addTo(instance);
     } else {
-      hereMarker.current.setLatLng(toLeaflet(here));
+      hereMarker.current.setLngLat(toLngLat(here));
     }
 
     /*
@@ -513,17 +876,16 @@ const CampusMap = ({
      */
     if (follow && needsGuideZoom.current) {
       needsGuideZoom.current = false;
-      instance.setView(
-        toLeaflet(here),
-        Math.max(instance.getZoom(), GUIDE_ZOOM),
-        { animate: false },
-      );
+      instance.jumpTo({
+        center: toLngLat(here),
+        zoom: Math.max(instance.getZoom(), GUIDE_ZOOM),
+      });
     } else if (follow) {
-      instance.panTo(toLeaflet(here), { animate: false });
-    } else if (!instance.getBounds().pad(-0.15).contains(toLeaflet(here))) {
-      instance.panTo(toLeaflet(here), { animate: false });
+      instance.jumpTo({ center: toLngLat(here) });
+    } else if (!isWellInView(instance, here)) {
+      instance.jumpTo({ center: toLngLat(here) });
     }
-  }, [here, accuracy, follow]);
+  }, [here, accuracy, follow, styleRev]);
 
   return <div ref={holder} className={s.container} />;
 };
