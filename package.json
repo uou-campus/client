@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "seed": "node scripts/seed-campus.mjs",
+    "labels": "node scripts/make-building-labels.mjs",
     "icons": "node scripts/make-icons.mjs",
     "font": "node scripts/make-font.mjs",
     "dev": "vite",

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import maplibregl, {
   type ExpressionSpecification,
+  type FilterSpecification,
   type GeoJSONSource,
   type LineLayerSpecification,
   type StyleSpecification,
@@ -31,6 +32,7 @@ import {
   type LineStyle,
 } from '@/map/mapStyle';
 import { endpointIcon, hereIcon, junctionIcon, placeIcon } from '@/map/icons';
+import { splitBuildingLabels, type BuildingLabel } from '@/map/buildingLabels';
 import type { SheetState } from '@/components/RoutePanel';
 import { theme } from '@/styles';
 import * as s from './style.css';
@@ -115,6 +117,7 @@ const SRC = {
   passed: 'campus-passed',
   shortcut: 'campus-shortcut',
   halo: 'campus-halo',
+  buildingNames: 'campus-building-names',
 } as const;
 
 const edgeLayerId = (kind: string) => `campus-edge-${kind}`;
@@ -169,6 +172,17 @@ const lines = (
 });
 
 const EMPTY = lines([]);
+
+const labelPoints = (
+  labels: BuildingLabel[],
+): FeatureCollection<Geometry, Props_> => ({
+  type: 'FeatureCollection',
+  features: labels.map((label): Feature<Geometry, Props_> => ({
+    type: 'Feature',
+    properties: { name: label.name, minor: Boolean(label.minor) },
+    geometry: { type: 'Point', coordinates: toLngLat(label) },
+  })),
+});
 
 /** 땅 위의 원. 미터 단위 반경을 위경도 다각형으로 펼친다. */
 const circle = (
@@ -236,6 +250,48 @@ const addOverlays = (map: maplibregl.Map) => {
       paint: linePaint(style),
     });
 
+  /*
+   * 건물 이름표. 예전 OSM 지도가 건물 위에 써 주던 이름을 되살린다.
+   *
+   * 맨 밑에 깐다 — 길과 경로가 그 위를 지나가야 한다. 배경 지도의 장소 이름과
+   * 같은 결(회색 글자에 흰 테)로 맞추고, 앱 이름표처럼 당겨야 뜬다. 아파트 동
+   * 번호는 한 단계 더 당겨야 뜬다.
+   *
+   * 글자를 그리려면 스타일에 글꼴 주소가 있어야 해서, 대체 바탕(오프라인)에서는
+   * 건너뛴다.
+   */
+  if (map.getStyle().glyphs) {
+    const label = (
+      id: string,
+      minor: boolean,
+      minzoom: number,
+      size: number,
+      color: string,
+    ) =>
+      map.addLayer({
+        id,
+        type: 'symbol',
+        source: SRC.buildingNames,
+        minzoom,
+        filter: ['==', ['get', 'minor'], minor],
+        layout: {
+          'text-field': ['get', 'name'],
+          'text-font': ['Noto Sans Regular'],
+          'text-size': size,
+          'text-max-width': 7,
+          'text-padding': 2,
+        },
+        paint: {
+          'text-color': color,
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.2,
+          'text-halo-blur': 0.5,
+        },
+      });
+    label('campus-building-name', false, LABEL_ZOOM, 11.5, '#666666');
+    label('campus-building-number', true, LABEL_ZOOM + 1, 10.5, '#8c8c8c');
+  }
+
   /* 아래에 깔리는 것부터. */
   for (const kind of EDGE_KINDS) {
     map.addLayer({
@@ -275,25 +331,40 @@ const addOverlays = (map: maplibregl.Map) => {
 };
 
 /**
- * 배경 지도를 캠퍼스 앱에 맞게 다듬는다.
+ * 배경 지도를 캠퍼스 앱에 맞게 다듬는다. 지명은 한글로 바꾼다.
  *
- * - 지명은 한글로.
- * - 가게·시설 아이콘(POI)은 끈다. 캠퍼스 건물은 앱이 번호 점으로 따로 찍는데,
- *   배경 아이콘까지 겹치면 어느 게 누를 수 있는 건지 헷갈린다.
+ * 장소(정류장·편의점·식당·공원·주차장…) 레이어는 그대로 둔다. 예전 OSM 지도가
+ * 보여 주던 곳이라, 끄면 「정류장이 사라졌다」가 된다. 다만 앱 마커와 같은 곳은
+ * 이름이 두 번 뜨니 따로 거른다 — 그때 원래 거름 조건 위에 덧붙이려고, 장소
+ * 레이어의 원래 조건을 모아 돌려준다.
  */
 const tuneBaseStyle = (map: maplibregl.Map) => {
-  for (const layer of map.getStyle().layers ?? []) {
+  const layers = map.getStyle().layers ?? [];
+  const poiFilters = new Map<string, FilterSpecification | undefined>();
+  for (const layer of layers) {
     if (layer.type !== 'symbol' || layer.id.startsWith('campus-')) continue;
-    if (layer.id.startsWith('poi')) {
-      map.setLayoutProperty(layer.id, 'visibility', 'none');
-      continue;
-    }
+    if (layer['source-layer'] === 'poi') poiFilters.set(layer.id, layer.filter);
     const field = layer.layout?.['text-field'];
     /* 도로 번호 방패처럼 이름이 아닌 글자는 그대로 둔다. */
     if (field && JSON.stringify(field).includes('name')) {
       map.setLayoutProperty(layer.id, 'text-field', KOREAN_NAME);
     }
   }
+
+  /*
+   * 상가 거리에서는 도로 이름과 가게 이름이 자리를 다툰다. 지도는 위에 있는
+   * 레이어부터 글자 자리를 잡는데, 원래 스타일은 도로 이름이 위라 대학로 가게가
+   * 한 배율 더 당겨야 떴다. 장소 레이어를 도로 이름 위(동네 이름 바로 밑)로
+   * 올려 예전 OSM 지도와 같은 배율에서 보이게 한다.
+   */
+  const placeLabel = layers.find(
+    (layer) => layer.type === 'symbol' && layer['source-layer'] === 'place',
+  );
+  if (placeLabel) {
+    for (const id of poiFilters.keys()) map.moveLayer(id, placeLabel.id);
+  }
+
+  return poiFilters;
 };
 
 /** 화면 가장자리에서 안쪽으로 inset 비율만큼 들어온 상자 안에 있는지. */
@@ -382,6 +453,8 @@ const CampusMap = ({
   const hereMarker = useRef<maplibregl.Marker | null>(null);
   /** 지도에서 누른 길을 간선으로 되찾으려고 들고 있는 표. */
   const edgesById = useRef(new Map<string, CampusEdge>());
+  /** 배경 지도 장소 레이어의 원래 거름 조건. 앱 마커와 겹치는 곳을 거를 때 쓴다. */
+  const poiFilters = useRef(new Map<string, FilterSpecification | undefined>());
 
   /* 콜백은 매 렌더 새로 오지만 지도는 한 번만 만든다. 최신 것만 참조로 들고 간다. */
   const handlers = useRef({ onPickNode, onPickEdge, onMoveNode, onMapClick });
@@ -443,7 +516,7 @@ const CampusMap = ({
     let styled = false;
     instance.on('style.load', () => {
       styled = true;
-      tuneBaseStyle(instance);
+      poiFilters.current = tuneBaseStyle(instance);
       addOverlays(instance);
       setStyleRev((n) => n + 1);
     });
@@ -462,6 +535,16 @@ const CampusMap = ({
       if (styled || fellBack) return;
       fellBack = true;
       instance.setStyle(FALLBACK_STYLE);
+    });
+
+    /*
+     * 배경 스타일의 아이콘 묶음에 없는 장소 종류가 있다(사무실·체육 시설 등).
+     * 이름은 그대로 뜨는데, 그릴 때마다 콘솔에 「그림을 못 찾았다」가 쌓인다.
+     * 투명한 한 점으로 채워 둔다.
+     */
+    instance.on('styleimagemissing', ({ id }) => {
+      if (instance.hasImage(id)) return;
+      instance.addImage(id, { width: 1, height: 1, data: new Uint8Array(4) });
     });
 
     const syncZoomClass = () => {
@@ -725,6 +808,42 @@ const CampusMap = ({
     }
     if (!editing) instance.getCanvas().style.cursor = '';
   }, [graph, editing, selectedId, styleRev]);
+
+  /* ── 건물 이름표·배경 장소 ───────────────────────────────────────────── */
+  useEffect(() => {
+    const instance = map.current;
+    if (!instance || !styleRev) return;
+
+    /*
+     * 그래프와 맞대 보고 나눈다. 편집 모드에서 건물을 새로 찍으면 그 건물의
+     * 이름표는 거기서 빠지고 앱 마커가 대신한다.
+     */
+    const { shown, hiddenPoiNames } = splitBuildingLabels(graph.nodes.values());
+    setSource(instance, SRC.buildingNames, labelPoints(shown));
+
+    /*
+     * 앱 마커와 같은 곳은 배경 장소에서 뺀다. 같은 이름이 마커 옆에 한 번 더
+     * 뜨면 어느 쪽을 눌러야 하는지 헷갈린다. 정류장·가게처럼 앱에 없는 곳은
+     * 그대로 둔다.
+     */
+    const notOurs: ExpressionSpecification = [
+      '!',
+      [
+        'in',
+        ['coalesce', ['get', 'name:ko'], ['get', 'name'], ''],
+        ['literal', hiddenPoiNames],
+      ],
+    ];
+    for (const [id, original] of poiFilters.current) {
+      if (!instance.getLayer(id)) continue;
+      instance.setFilter(
+        id,
+        original
+          ? (['all', original, notOurs] as FilterSpecification)
+          : notOurs,
+      );
+    }
+  }, [graph, styleRev]);
 
   /* ── 고른 경로 ───────────────────────────────────────────────────────── */
   useEffect(() => {
